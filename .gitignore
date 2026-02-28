@@ -1,3 +1,4 @@
 node_modules/
 .env
 watchlist.json
+scanner.log
