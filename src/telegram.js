@@ -30,7 +30,7 @@ export async function sendMessage(text) {
 }
 
 /**
- * Send a bid alert notification.
+ * Send a bid alert notification (watchlist mode).
  */
 export async function sendBidAlert({
   tokenName,
@@ -45,6 +45,28 @@ export async function sendBidAlert({
     `<b>New bid:</b> ${newBidEth.toFixed(4)} WETH\n` +
     `<b>Previous high:</b> ${previousHighEth.toFixed(4)} WETH\n` +
     `<b>Bidder:</b> <code>${offerer}</code>\n\n` +
+    `<a href="${openseaUrl}">View on OpenSea</a>`;
+
+  return sendMessage(text);
+}
+
+/**
+ * Send an outbid alert notification (wallet mode).
+ */
+export async function sendOutbidAlert({
+  tokenName,
+  myBidEth,
+  topBidEth,
+  topBidder,
+  openseaUrl,
+}) {
+  const diff = topBidEth - myBidEth;
+  const text =
+    `<b>Outbid Alert!</b>\n\n` +
+    `<b>NFT:</b> ${tokenName}\n` +
+    `<b>Your bid:</b> ${myBidEth.toFixed(4)} WETH\n` +
+    `<b>Top bid:</b> ${topBidEth.toFixed(4)} WETH (+${diff.toFixed(4)})\n` +
+    `<b>Top bidder:</b> <code>${topBidder}</code>\n\n` +
     `<a href="${openseaUrl}">View on OpenSea</a>`;
 
   return sendMessage(text);

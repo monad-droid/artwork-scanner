@@ -111,3 +111,74 @@ export function getOfferer(offer) {
     "unknown"
   );
 }
+
+/**
+ * Fetch all active offers made by a specific wallet address.
+ * Paginates through all results automatically.
+ */
+export async function getAccountOffers(chain, walletAddress) {
+  let allOrders = [];
+  let cursor = null;
+
+  do {
+    const params = new URLSearchParams({
+      maker: walletAddress,
+      limit: "50",
+    });
+    if (cursor) params.set("cursor", cursor);
+
+    const url = `${baseUrl}/orders/${chain}/seaport/offers?${params}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      throw new Error(
+        `OpenSea getAccountOffers failed (${res.status}): ${await res.text()}`
+      );
+    }
+    const data = await res.json();
+    allOrders = allOrders.concat(data.orders || []);
+    cursor = data.next;
+  } while (cursor);
+
+  return allOrders;
+}
+
+/**
+ * Parse a Seaport order into normalized item details.
+ * Returns null for collection offers or unparseable orders.
+ */
+export function parseOrder(order, chain = "ethereum") {
+  const params = order.protocol_data?.parameters;
+  if (!params) return null;
+
+  // Find the NFT in consideration (itemType 2 = ERC721, 3 = ERC1155)
+  let contractAddress = "";
+  let tokenId = "";
+  for (const item of params.consideration || []) {
+    const type = Number(item.itemType);
+    if (type === 2 || type === 3) {
+      contractAddress = item.token;
+      tokenId = item.identifierOrCriteria;
+      break;
+    }
+  }
+
+  // Skip collection offers (tokenId = 0) and orders without NFT details
+  if (!contractAddress || !tokenId || tokenId === "0") return null;
+
+  // Parse bid amount from current_price (wei -> ETH)
+  const myBid = Number(BigInt(order.current_price || "0")) / 1e18;
+
+  const collectionSlug = order.criteria?.collection?.slug || "";
+
+  return {
+    chain,
+    contractAddress: contractAddress.toLowerCase(),
+    tokenId: String(tokenId),
+    collectionSlug,
+    myBid,
+    orderHash: order.order_hash,
+    name: collectionSlug
+      ? `${collectionSlug} #${tokenId}`
+      : `${contractAddress.slice(0, 10)}.../${tokenId}`,
+  };
+}

@@ -2,19 +2,27 @@
 import "dotenv/config";
 import { parseOpenseaUrl, buildOpenseaUrl } from "./parse-url.js";
 import * as watchlist from "./watchlist.js";
-import { resolveCollectionSlug } from "./opensea.js";
+import {
+  resolveCollectionSlug,
+  getAccountOffers,
+  parseOrder,
+  getBestOffer,
+  parseOfferPrice,
+  getOfferer,
+} from "./opensea.js";
 
 const [, , command, ...args] = process.argv;
 
 const USAGE = `
 Usage:
-  node src/cli.js add <opensea-url> <your-bid-in-eth>
+  node src/cli.js offers [wallet-address]   Show active offers for a wallet (uses WALLET_ADDRESS from .env if omitted)
+  node src/cli.js add <opensea-url> <bid>   Add an NFT to the watchlist (legacy mode)
   node src/cli.js remove <opensea-url | index>
-  node src/cli.js list
+  node src/cli.js list                      Show watchlist (legacy mode)
 
 Examples:
+  node src/cli.js offers 0xa462...
   node src/cli.js add https://opensea.io/item/ethereum/0xa7d8.../163000007 2.5
-  node src/cli.js remove https://opensea.io/item/ethereum/0xa7d8.../163000007
   node src/cli.js remove 1
   node src/cli.js list
 `.trim();
@@ -101,7 +109,61 @@ function listNfts() {
   });
 }
 
+async function showOffers(addressArg) {
+  const address = addressArg || process.env.WALLET_ADDRESS;
+  if (!address) {
+    console.error(
+      "No wallet address provided.\n" +
+        "Usage: node src/cli.js offers <wallet-address>\n" +
+        "Or set WALLET_ADDRESS in your .env file."
+    );
+    process.exit(1);
+  }
+
+  const chain = process.env.WALLET_CHAIN || "ethereum";
+  console.log(`Fetching active offers for ${address}...\n`);
+
+  const orders = await getAccountOffers(chain, address);
+  const items = orders.map((o) => parseOrder(o, chain)).filter(Boolean);
+
+  if (items.length === 0) {
+    console.log("No active item offers found.");
+    return;
+  }
+
+  console.log(`Found ${items.length} active item offer(s):\n`);
+
+  for (const item of items) {
+    const url = buildOpenseaUrl(item.chain, item.contractAddress, item.tokenId);
+    let status = "";
+
+    try {
+      const bestOffer = await getBestOffer(item.collectionSlug, item.tokenId);
+      const bestPrice = parseOfferPrice(bestOffer);
+      const bestBidder = getOfferer(bestOffer);
+      const isOurs = bestBidder.toLowerCase() === address.toLowerCase();
+
+      if (isOurs) {
+        status = "TOP BIDDER";
+      } else if (bestPrice > item.myBid) {
+        status = `OUTBID (top: ${bestPrice.toFixed(4)} by ${bestBidder.slice(0, 10)}...)`;
+      } else {
+        status = `OK (top: ${bestPrice.toFixed(4)})`;
+      }
+    } catch {
+      status = "could not check";
+    }
+
+    console.log(`  ${item.name}`);
+    console.log(`  Your bid: ${item.myBid.toFixed(4)} WETH — ${status}`);
+    console.log(`  ${url}\n`);
+  }
+}
+
 switch (command) {
+  case "offers":
+    await showOffers(args[0]);
+    break;
   case "add":
     await addNft(args[0], args[1]);
     break;

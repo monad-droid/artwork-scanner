@@ -19,8 +19,13 @@ export const config = {
     botToken: required("TELEGRAM_BOT_TOKEN"),
     chatId: required("TELEGRAM_CHAT_ID"),
   },
-  // NFT fields are optional — watchlist.json is the primary source.
-  // These are only used for auto-migration on first run.
+  // Wallet mode: track all active offers from this wallet automatically.
+  // When set, the scanner monitors your bids and alerts when outbid.
+  wallet: {
+    address: process.env.WALLET_ADDRESS || "",
+    chain: process.env.WALLET_CHAIN || "ethereum",
+  },
+  // Legacy: NFT fields for watchlist mode (used when WALLET_ADDRESS is not set).
   nft: {
     chain: process.env.NFT_CHAIN || "ethereum",
     contractAddress: process.env.NFT_CONTRACT_ADDRESS || "",

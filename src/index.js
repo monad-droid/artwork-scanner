@@ -4,28 +4,172 @@ import {
   getBestOffer,
   parseOfferPrice,
   getOfferer,
+  getAccountOffers,
+  parseOrder,
 } from "./opensea.js";
-import { sendMessage, sendBidAlert, getUpdates } from "./telegram.js";
+import {
+  sendMessage,
+  sendBidAlert,
+  sendOutbidAlert,
+  getUpdates,
+} from "./telegram.js";
 import * as watchlist from "./watchlist.js";
 import { parseOpenseaUrl, buildOpenseaUrl } from "./parse-url.js";
 
 const { pollIntervalMs } = config;
+const walletMode = !!config.wallet.address;
 
-// In-memory map of "contract:tokenId" -> highest known bid
+// Watchlist mode state
 const highestBids = new Map();
+
+// Wallet mode state: "contract:tokenId" -> { lastAlertedTopBid }
+const outbidAlerts = new Map();
+// Cached status for /list command: "contract:tokenId" -> status object
+const offerStatus = new Map();
+
 const startedAt = Date.now();
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
-function itemKey(item) {
+function itemKey(contractAddress, tokenId) {
+  return `${contractAddress}:${tokenId}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Wallet Mode
+// ═══════════════════════════════════════════════════════════════
+
+async function pollWalletOffers() {
+  const { address, chain } = config.wallet;
+
+  log(`Fetching active offers for ${address.slice(0, 10)}...`);
+
+  let orders;
+  try {
+    orders = await getAccountOffers(chain, address);
+  } catch (err) {
+    log(`Error fetching wallet offers: ${err.message}`);
+    return;
+  }
+
+  const items = orders.map((o) => parseOrder(o, chain)).filter(Boolean);
+  log(
+    `Found ${items.length} active item offer(s) (${orders.length} total orders)`
+  );
+
+  // Clear stale status for offers no longer active
+  const activeKeys = new Set(
+    items.map((i) => itemKey(i.contractAddress, i.tokenId))
+  );
+  for (const key of offerStatus.keys()) {
+    if (!activeKeys.has(key)) {
+      offerStatus.delete(key);
+      outbidAlerts.delete(key);
+    }
+  }
+
+  let outbidCount = 0;
+
+  for (const item of items) {
+    try {
+      await checkWalletItem(item);
+      const key = itemKey(item.contractAddress, item.tokenId);
+      if (offerStatus.get(key)?.outbid) outbidCount++;
+    } catch (err) {
+      log(`[${item.name}] Error: ${err.message}`);
+    }
+  }
+
+  if (outbidCount > 0) {
+    log(`Summary: outbid on ${outbidCount}/${items.length} item(s)`);
+  } else {
+    log(`Summary: top bidder on all ${items.length} item(s)`);
+  }
+}
+
+async function checkWalletItem(item) {
+  const key = itemKey(item.contractAddress, item.tokenId);
+  const { address } = config.wallet;
+
+  // Resolve slug if missing
+  if (!item.collectionSlug) {
+    try {
+      item.collectionSlug = await resolveCollectionSlug(
+        item.chain,
+        item.contractAddress,
+        item.tokenId
+      );
+      item.name = `${item.collectionSlug} #${item.tokenId}`;
+    } catch {
+      // Continue without slug
+    }
+  }
+
+  const bestOffer = await getBestOffer(item.collectionSlug, item.tokenId);
+  const bestPrice = parseOfferPrice(bestOffer);
+  const bestBidder = getOfferer(bestOffer);
+
+  const isOurBid = bestBidder.toLowerCase() === address.toLowerCase();
+  const outbid = !isOurBid && bestPrice > item.myBid;
+
+  // Cache status for /list
+  offerStatus.set(key, {
+    name: item.name,
+    myBid: item.myBid,
+    bestPrice,
+    bestBidder,
+    outbid,
+    collectionSlug: item.collectionSlug,
+    contractAddress: item.contractAddress,
+    tokenId: item.tokenId,
+    chain: item.chain,
+  });
+
+  if (outbid) {
+    const lastAlerted = outbidAlerts.get(key);
+    if (lastAlerted !== bestPrice) {
+      log(
+        `[${item.name}] OUTBID! Your bid: ${item.myBid.toFixed(4)} | Top: ${bestPrice.toFixed(4)} by ${bestBidder}`
+      );
+
+      await sendOutbidAlert({
+        tokenName: item.name,
+        myBidEth: item.myBid,
+        topBidEth: bestPrice,
+        topBidder: bestBidder,
+        openseaUrl: buildOpenseaUrl(
+          item.chain,
+          item.contractAddress,
+          item.tokenId
+        ),
+      });
+
+      outbidAlerts.set(key, bestPrice);
+    } else {
+      log(
+        `[${item.name}] Still outbid (${bestPrice.toFixed(4)} > ${item.myBid.toFixed(4)}) — already alerted`
+      );
+    }
+  } else if (isOurBid) {
+    log(`[${item.name}] Top bidder at ${item.myBid.toFixed(4)} WETH`);
+    outbidAlerts.delete(key);
+  } else {
+    log(
+      `[${item.name}] Best: ${bestPrice.toFixed(4)} | Ours: ${item.myBid.toFixed(4)} — OK`
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Watchlist Mode (legacy)
+// ═══════════════════════════════════════════════════════════════
+
+function itemKeyLegacy(item) {
   return `${item.contractAddress}:${item.tokenId}`;
 }
 
-/**
- * Ensure an item has a resolved collection slug. If not, resolve and persist it.
- */
 async function ensureSlug(item) {
   if (item.collectionSlug) return item;
   log(`Resolving slug for ${item.contractAddress}/${item.tokenId}...`);
@@ -42,12 +186,9 @@ async function ensureSlug(item) {
   return item;
 }
 
-/**
- * Check bids for a single watchlist item.
- */
 async function checkItem(item) {
   await ensureSlug(item);
-  const key = itemKey(item);
+  const key = itemKeyLegacy(item);
   const threshold = highestBids.get(key) ?? item.bidThresholdEth;
 
   const bestOffer = await getBestOffer(item.collectionSlug, item.tokenId);
@@ -59,7 +200,9 @@ async function checkItem(item) {
     return;
   }
 
-  log(`[${label}] Best: ${bestPrice.toFixed(4)} WETH | Threshold: ${threshold.toFixed(4)} WETH`);
+  log(
+    `[${label}] Best: ${bestPrice.toFixed(4)} WETH | Threshold: ${threshold.toFixed(4)} WETH`
+  );
 
   if (bestPrice > threshold) {
     const offerer = getOfferer(bestOffer);
@@ -70,16 +213,17 @@ async function checkItem(item) {
       newBidEth: bestPrice,
       previousHighEth: threshold,
       offerer,
-      openseaUrl: buildOpenseaUrl(item.chain, item.contractAddress, item.tokenId),
+      openseaUrl: buildOpenseaUrl(
+        item.chain,
+        item.contractAddress,
+        item.tokenId
+      ),
     });
 
     highestBids.set(key, bestPrice);
   }
 }
 
-/**
- * Poll all items in the watchlist.
- */
 async function pollBids() {
   const items = watchlist.getAll();
   if (items.length === 0) return;
@@ -95,15 +239,16 @@ async function pollBids() {
   }
 }
 
-/**
- * Handle incoming Telegram bot commands.
- */
+// ═══════════════════════════════════════════════════════════════
+// Telegram Commands
+// ═══════════════════════════════════════════════════════════════
+
 async function handleTelegramCommands() {
   let messages;
   try {
     messages = await getUpdates();
   } catch {
-    return; // Silently skip if Telegram polling fails
+    return;
   }
 
   for (const msg of messages) {
@@ -111,38 +256,38 @@ async function handleTelegramCommands() {
     if (!text.startsWith("/")) continue;
 
     const parts = text.split(/\s+/);
-    const cmd = parts[0].toLowerCase().replace(/@\w+$/, ""); // strip @botname
+    const cmd = parts[0].toLowerCase().replace(/@\w+$/, "");
 
     try {
       switch (cmd) {
         case "/track":
-          await handleTrack(parts.slice(1));
+          if (!walletMode) await handleTrack(parts.slice(1));
+          else
+            await sendMessage(
+              "Wallet mode is active — offers are tracked automatically.\n" +
+                "Use /list to see your active offers."
+            );
           break;
         case "/untrack":
-          await handleUntrack(parts.slice(1));
+          if (!walletMode) await handleUntrack(parts.slice(1));
+          else
+            await sendMessage(
+              "Wallet mode is active — offers are tracked automatically.\n" +
+                "Cancel your bid on OpenSea to stop tracking it."
+            );
           break;
         case "/list":
           await handleList();
+          break;
+        case "/wallet":
+          await handleWallet();
           break;
         case "/status":
           await handleStatus();
           break;
         case "/help":
         case "/start":
-          log(`Telegram: /help requested`);
-          await sendMessage(
-            `<b>Bid Scanner Commands</b>\n\n` +
-              `<b>/track</b> &lt;opensea-url&gt; &lt;bid&gt;\n` +
-              `Add an NFT and alert when best offer exceeds &lt;bid&gt; WETH\n\n` +
-              `<b>/untrack</b> &lt;opensea-url | #number&gt;\n` +
-              `Stop tracking an NFT (use # number from /list)\n\n` +
-              `<b>/list</b>\n` +
-              `Show all tracked NFTs with current best offers\n\n` +
-              `<b>/status</b>\n` +
-              `Check if the bot is running\n\n` +
-              `<b>/help</b>\n` +
-              `Show this message`
-          );
+          await handleHelp();
           break;
       }
     } catch (err) {
@@ -202,7 +347,6 @@ async function handleUntrack(args) {
   const target = args[0];
   let removed;
 
-  // Allow "#1", "#2" etc. for index-based removal
   const indexMatch = target.match(/^#?(\d+)$/);
   if (indexMatch) {
     removed = watchlist.removeByIndex(parseInt(indexMatch[1], 10));
@@ -213,12 +357,36 @@ async function handleUntrack(args) {
 
   if (removed) {
     const label = removed.name || `${removed.contractAddress}/${removed.tokenId}`;
-    highestBids.delete(itemKey(removed));
+    highestBids.delete(itemKeyLegacy(removed));
     await sendMessage(`<b>Stopped tracking:</b> ${label}`);
     log(`Telegram: removed ${label}`);
   } else {
     await sendMessage("Not found in watchlist. Use /list to see tracked NFTs.");
   }
+}
+
+async function handleWallet() {
+  if (!walletMode) {
+    await sendMessage(
+      "Wallet mode is not active.\n" +
+        "Set <code>WALLET_ADDRESS</code> in your .env to enable it."
+    );
+    return;
+  }
+
+  const { address, chain } = config.wallet;
+  const count = offerStatus.size;
+  const outbidCount = [...offerStatus.values()].filter((s) => s.outbid).length;
+
+  await sendMessage(
+    `<b>Tracked Wallet</b>\n\n` +
+      `<b>Address:</b> <code>${address}</code>\n` +
+      `<b>Chain:</b> ${chain}\n` +
+      `<b>Active offers:</b> ${count}\n` +
+      `<b>Outbid on:</b> ${outbidCount}\n\n` +
+      `<a href="https://opensea.io/profile/offers?addresses=${address}">View on OpenSea</a>`
+  );
+  log(`Telegram: /wallet requested`);
 }
 
 async function handleStatus() {
@@ -233,30 +401,93 @@ async function handleStatus() {
   if (hours > 0 || days > 0) uptimeStr += `${hours}h `;
   uptimeStr += `${minutes}m ${seconds}s`;
 
-  const items = watchlist.getAll();
   const pollSec = pollIntervalMs / 1000;
 
-  await sendMessage(
-    `<b>Bot Status: Running</b>\n\n` +
-      `<b>Uptime:</b> ${uptimeStr}\n` +
-      `<b>Tracking:</b> ${items.length} NFT(s)\n` +
-      `<b>Poll interval:</b> ${pollSec}s`
-  );
+  if (walletMode) {
+    const count = offerStatus.size;
+    const outbidCount = [...offerStatus.values()].filter(
+      (s) => s.outbid
+    ).length;
+
+    await sendMessage(
+      `<b>Bot Status: Running (Wallet Mode)</b>\n\n` +
+        `<b>Uptime:</b> ${uptimeStr}\n` +
+        `<b>Wallet:</b> <code>${config.wallet.address.slice(0, 10)}...</code>\n` +
+        `<b>Active offers:</b> ${count}\n` +
+        `<b>Outbid on:</b> ${outbidCount}\n` +
+        `<b>Poll interval:</b> ${pollSec}s`
+    );
+  } else {
+    const items = watchlist.getAll();
+    await sendMessage(
+      `<b>Bot Status: Running</b>\n\n` +
+        `<b>Uptime:</b> ${uptimeStr}\n` +
+        `<b>Tracking:</b> ${items.length} NFT(s)\n` +
+        `<b>Poll interval:</b> ${pollSec}s`
+    );
+  }
   log(`Telegram: /status requested`);
 }
 
 async function handleList() {
+  if (walletMode) {
+    await handleListWallet();
+  } else {
+    await handleListWatchlist();
+  }
+}
+
+async function handleListWallet() {
+  if (offerStatus.size === 0) {
+    await sendMessage(
+      "No active offers found yet.\n\n" +
+        "The scanner will pick up your offers on the next poll cycle."
+    );
+    return;
+  }
+
+  let text = `<b>Your Active Offers (${offerStatus.size}):</b>\n\n`;
+  let i = 1;
+
+  for (const status of offerStatus.values()) {
+    const url = buildOpenseaUrl(
+      status.chain,
+      status.contractAddress,
+      status.tokenId
+    );
+    const label = status.name;
+
+    if (status.outbid) {
+      text += `${i}. <a href="${url}">${label}</a>\n`;
+      text += `   ${status.myBid.toFixed(4)} WETH — <b>OUTBID</b> (top: ${status.bestPrice.toFixed(4)} by ${status.bestBidder.slice(0, 10)}...)\n\n`;
+    } else {
+      text += `${i}. <a href="${url}">${label}</a>\n`;
+      text += `   ${status.myBid.toFixed(4)} WETH — top bidder\n\n`;
+    }
+    i++;
+  }
+
+  await sendMessage(text);
+}
+
+async function handleListWatchlist() {
   const items = watchlist.getAll();
   if (items.length === 0) {
-    await sendMessage("Watchlist is empty.\n\nUse /track &lt;opensea-url&gt; &lt;bid&gt; to add one.");
+    await sendMessage(
+      "Watchlist is empty.\n\nUse /track &lt;opensea-url&gt; &lt;bid&gt; to add one."
+    );
     return;
   }
 
   let text = `<b>Watching ${items.length} NFT(s):</b>\n\n`;
   items.forEach((item, i) => {
-    const url = buildOpenseaUrl(item.chain, item.contractAddress, item.tokenId);
+    const url = buildOpenseaUrl(
+      item.chain,
+      item.contractAddress,
+      item.tokenId
+    );
     const label = item.name || `${item.contractAddress}/${item.tokenId}`;
-    const current = highestBids.get(itemKey(item));
+    const current = highestBids.get(itemKeyLegacy(item));
     const currentStr = current ? ` (current best: ${current.toFixed(4)})` : "";
     text += `${i + 1}. <a href="${url}">${label}</a>\n`;
     text += `    Alert above: ${item.bidThresholdEth} WETH${currentStr}\n\n`;
@@ -264,15 +495,48 @@ async function handleList() {
   await sendMessage(text);
 }
 
-/**
- * Migrate the single-NFT env config into the watchlist on first run.
- */
+async function handleHelp() {
+  log(`Telegram: /help requested`);
+
+  if (walletMode) {
+    await sendMessage(
+      `<b>Bid Scanner Commands (Wallet Mode)</b>\n\n` +
+        `<b>/list</b>\n` +
+        `Show all active offers with outbid status\n\n` +
+        `<b>/wallet</b>\n` +
+        `Show tracked wallet info\n\n` +
+        `<b>/status</b>\n` +
+        `Check if the bot is running\n\n` +
+        `<b>/help</b>\n` +
+        `Show this message`
+    );
+  } else {
+    await sendMessage(
+      `<b>Bid Scanner Commands</b>\n\n` +
+        `<b>/track</b> &lt;opensea-url&gt; &lt;bid&gt;\n` +
+        `Add an NFT and alert when best offer exceeds &lt;bid&gt; WETH\n\n` +
+        `<b>/untrack</b> &lt;opensea-url | #number&gt;\n` +
+        `Stop tracking an NFT (use # number from /list)\n\n` +
+        `<b>/list</b>\n` +
+        `Show all tracked NFTs with current best offers\n\n` +
+        `<b>/status</b>\n` +
+        `Check if the bot is running\n\n` +
+        `<b>/help</b>\n` +
+        `Show this message`
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Bootstrap
+// ═══════════════════════════════════════════════════════════════
+
 function migrateEnvConfig() {
   const { nft, currentBidEth } = config;
   if (!nft.contractAddress || !nft.tokenId) return;
 
   const existing = watchlist.find(nft.contractAddress, nft.tokenId);
-  if (existing) return; // Already in watchlist
+  if (existing) return;
 
   log("Migrating .env NFT config into watchlist...");
   watchlist.add({
@@ -288,29 +552,43 @@ function migrateEnvConfig() {
 }
 
 async function main() {
-  migrateEnvConfig();
-
-  const items = watchlist.getAll();
-  log(`Loaded ${items.length} NFT(s) from watchlist.`);
-  log(`Poll interval: ${pollIntervalMs / 1000}s`);
-
-  // Initialize thresholds from watchlist
-  for (const item of items) {
-    highestBids.set(itemKey(item), item.bidThresholdEth);
+  if (walletMode) {
+    log(`Wallet mode: tracking offers from ${config.wallet.address}`);
+    log(`Chain: ${config.wallet.chain}`);
+  } else {
+    migrateEnvConfig();
+    const items = watchlist.getAll();
+    log(`Watchlist mode: loaded ${items.length} NFT(s)`);
+    for (const item of items) {
+      highestBids.set(
+        itemKeyLegacy(item),
+        item.bidThresholdEth
+      );
+    }
   }
 
-  await sendMessage(
-    `<b>Bid Scanner Started</b>\n` +
-      `Watching ${items.length} NFT(s). Poll interval: ${pollIntervalMs / 1000}s\n\n` +
+  log(`Poll interval: ${pollIntervalMs / 1000}s`);
+
+  const startMsg = walletMode
+    ? `<b>Bid Scanner Started (Wallet Mode)</b>\n` +
+      `<b>Tracking:</b> <code>${config.wallet.address}</code>\n` +
+      `<b>Poll interval:</b> ${pollIntervalMs / 1000}s\n\n` +
       `Send /help for commands.`
-  );
+    : `<b>Bid Scanner Started</b>\n` +
+      `Watching ${watchlist.getAll().length} NFT(s). Poll interval: ${pollIntervalMs / 1000}s\n\n` +
+      `Send /help for commands.`;
+
+  await sendMessage(startMsg);
 
   async function tick() {
     await handleTelegramCommands();
-    await pollBids();
+    if (walletMode) {
+      await pollWalletOffers();
+    } else {
+      await pollBids();
+    }
   }
 
-  // Run immediately, then on interval
   await tick();
   setInterval(tick, pollIntervalMs);
 
