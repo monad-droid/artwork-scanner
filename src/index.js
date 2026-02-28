@@ -16,8 +16,39 @@ import {
 import * as watchlist from "./watchlist.js";
 import { parseOpenseaUrl, buildOpenseaUrl } from "./parse-url.js";
 
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WALLET_PATH = resolve(__dirname, "..", "wallet.json");
+
 const { pollIntervalMs } = config;
-const walletMode = !!config.wallet.address;
+
+// Mutable wallet state — can be set via Telegram /wallet command
+let walletAddress = loadWallet() || config.wallet.address;
+let walletChain = config.wallet.chain;
+
+function isWalletMode() {
+  return !!walletAddress;
+}
+
+function loadWallet() {
+  if (!existsSync(WALLET_PATH)) return "";
+  try {
+    const data = JSON.parse(readFileSync(WALLET_PATH, "utf-8"));
+    return data.address || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveWallet(address) {
+  writeFileSync(
+    WALLET_PATH,
+    JSON.stringify({ address, updatedAt: new Date().toISOString() }, null, 2) + "\n"
+  );
+}
 
 // Watchlist mode state
 const highestBids = new Map();
@@ -42,19 +73,17 @@ function itemKey(contractAddress, tokenId) {
 // ═══════════════════════════════════════════════════════════════
 
 async function pollWalletOffers() {
-  const { address, chain } = config.wallet;
-
-  log(`Fetching active offers for ${address.slice(0, 10)}...`);
+  log(`Fetching active offers for ${walletAddress.slice(0, 10)}...`);
 
   let orders;
   try {
-    orders = await getAccountOffers(chain, address);
+    orders = await getAccountOffers(walletChain, walletAddress);
   } catch (err) {
     log(`Error fetching wallet offers: ${err.message}`);
     return;
   }
 
-  const items = orders.map((o) => parseOrder(o, chain)).filter(Boolean);
+  const items = orders.map((o) => parseOrder(o, walletChain)).filter(Boolean);
   log(
     `Found ${items.length} active item offer(s) (${orders.length} total orders)`
   );
@@ -91,8 +120,6 @@ async function pollWalletOffers() {
 
 async function checkWalletItem(item) {
   const key = itemKey(item.contractAddress, item.tokenId);
-  const { address } = config.wallet;
-
   // Resolve slug if missing
   if (!item.collectionSlug) {
     try {
@@ -111,7 +138,7 @@ async function checkWalletItem(item) {
   const bestPrice = parseOfferPrice(bestOffer);
   const bestBidder = getOfferer(bestOffer);
 
-  const isOurBid = bestBidder.toLowerCase() === address.toLowerCase();
+  const isOurBid = bestBidder.toLowerCase() === walletAddress.toLowerCase();
   const outbid = !isOurBid && bestPrice > item.myBid;
 
   // Cache status for /list
@@ -261,7 +288,7 @@ async function handleTelegramCommands() {
     try {
       switch (cmd) {
         case "/track":
-          if (!walletMode) await handleTrack(parts.slice(1));
+          if (!isWalletMode()) await handleTrack(parts.slice(1));
           else
             await sendMessage(
               "Wallet mode is active — offers are tracked automatically.\n" +
@@ -269,7 +296,7 @@ async function handleTelegramCommands() {
             );
           break;
         case "/untrack":
-          if (!walletMode) await handleUntrack(parts.slice(1));
+          if (!isWalletMode()) await handleUntrack(parts.slice(1));
           else
             await sendMessage(
               "Wallet mode is active — offers are tracked automatically.\n" +
@@ -280,7 +307,7 @@ async function handleTelegramCommands() {
           await handleList();
           break;
         case "/wallet":
-          await handleWallet();
+          await handleWallet(parts.slice(1));
           break;
         case "/status":
           await handleStatus();
@@ -365,26 +392,58 @@ async function handleUntrack(args) {
   }
 }
 
-async function handleWallet() {
-  if (!walletMode) {
+async function handleWallet(args) {
+  // /wallet <address> — set a new wallet to track
+  if (args.length > 0) {
+    const newAddress = args[0].trim().toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/i.test(newAddress)) {
+      await sendMessage(
+        "Invalid wallet address.\n" +
+          "Expected format: <code>0x</code> followed by 40 hex characters."
+      );
+      return;
+    }
+
+    const oldAddress = walletAddress;
+    walletAddress = newAddress;
+    saveWallet(newAddress);
+
+    // Clear stale state from previous wallet
+    offerStatus.clear();
+    outbidAlerts.clear();
+
+    const action = oldAddress ? "switched" : "set";
     await sendMessage(
-      "Wallet mode is not active.\n" +
-        "Set <code>WALLET_ADDRESS</code> in your .env to enable it."
+      `<b>Wallet ${action}!</b>\n\n` +
+        `<b>Address:</b> <code>${newAddress}</code>\n` +
+        `<b>Chain:</b> ${walletChain}\n\n` +
+        `Offers will be picked up on the next poll cycle.\n` +
+        `<a href="https://opensea.io/profile/offers?addresses=${newAddress}">View on OpenSea</a>`
+    );
+    log(`Telegram: wallet ${action} to ${newAddress}`);
+    return;
+  }
+
+  // /wallet (no args) — show current wallet info
+  if (!isWalletMode()) {
+    await sendMessage(
+      "No wallet set.\n\n" +
+        "Usage: /wallet &lt;address&gt;\n" +
+        "Example: <code>/wallet 0xa462...</code>"
     );
     return;
   }
 
-  const { address, chain } = config.wallet;
   const count = offerStatus.size;
   const outbidCount = [...offerStatus.values()].filter((s) => s.outbid).length;
 
   await sendMessage(
     `<b>Tracked Wallet</b>\n\n` +
-      `<b>Address:</b> <code>${address}</code>\n` +
-      `<b>Chain:</b> ${chain}\n` +
+      `<b>Address:</b> <code>${walletAddress}</code>\n` +
+      `<b>Chain:</b> ${walletChain}\n` +
       `<b>Active offers:</b> ${count}\n` +
       `<b>Outbid on:</b> ${outbidCount}\n\n` +
-      `<a href="https://opensea.io/profile/offers?addresses=${address}">View on OpenSea</a>`
+      `<a href="https://opensea.io/profile/offers?addresses=${walletAddress}">View on OpenSea</a>`
   );
   log(`Telegram: /wallet requested`);
 }
@@ -403,7 +462,7 @@ async function handleStatus() {
 
   const pollSec = pollIntervalMs / 1000;
 
-  if (walletMode) {
+  if (isWalletMode()) {
     const count = offerStatus.size;
     const outbidCount = [...offerStatus.values()].filter(
       (s) => s.outbid
@@ -412,7 +471,7 @@ async function handleStatus() {
     await sendMessage(
       `<b>Bot Status: Running (Wallet Mode)</b>\n\n` +
         `<b>Uptime:</b> ${uptimeStr}\n` +
-        `<b>Wallet:</b> <code>${config.wallet.address.slice(0, 10)}...</code>\n` +
+        `<b>Wallet:</b> <code>${walletAddress.slice(0, 10)}...</code>\n` +
         `<b>Active offers:</b> ${count}\n` +
         `<b>Outbid on:</b> ${outbidCount}\n` +
         `<b>Poll interval:</b> ${pollSec}s`
@@ -430,7 +489,7 @@ async function handleStatus() {
 }
 
 async function handleList() {
-  if (walletMode) {
+  if (isWalletMode()) {
     await handleListWallet();
   } else {
     await handleListWatchlist();
@@ -498,13 +557,15 @@ async function handleListWatchlist() {
 async function handleHelp() {
   log(`Telegram: /help requested`);
 
-  if (walletMode) {
+  if (isWalletMode()) {
     await sendMessage(
       `<b>Bid Scanner Commands (Wallet Mode)</b>\n\n` +
-        `<b>/list</b>\n` +
-        `Show all active offers with outbid status\n\n` +
+        `<b>/wallet</b> &lt;address&gt;\n` +
+        `Set or change the tracked wallet\n\n` +
         `<b>/wallet</b>\n` +
         `Show tracked wallet info\n\n` +
+        `<b>/list</b>\n` +
+        `Show all active offers with outbid status\n\n` +
         `<b>/status</b>\n` +
         `Check if the bot is running\n\n` +
         `<b>/help</b>\n` +
@@ -513,6 +574,8 @@ async function handleHelp() {
   } else {
     await sendMessage(
       `<b>Bid Scanner Commands</b>\n\n` +
+        `<b>/wallet</b> &lt;address&gt;\n` +
+        `Track a wallet's offers automatically\n\n` +
         `<b>/track</b> &lt;opensea-url&gt; &lt;bid&gt;\n` +
         `Add an NFT and alert when best offer exceeds &lt;bid&gt; WETH\n\n` +
         `<b>/untrack</b> &lt;opensea-url | #number&gt;\n` +
@@ -552,9 +615,9 @@ function migrateEnvConfig() {
 }
 
 async function main() {
-  if (walletMode) {
-    log(`Wallet mode: tracking offers from ${config.wallet.address}`);
-    log(`Chain: ${config.wallet.chain}`);
+  if (isWalletMode()) {
+    log(`Wallet mode: tracking offers from ${walletAddress}`);
+    log(`Chain: ${walletChain}`);
   } else {
     migrateEnvConfig();
     const items = watchlist.getAll();
@@ -569,20 +632,21 @@ async function main() {
 
   log(`Poll interval: ${pollIntervalMs / 1000}s`);
 
-  const startMsg = walletMode
+  const startMsg = isWalletMode()
     ? `<b>Bid Scanner Started (Wallet Mode)</b>\n` +
-      `<b>Tracking:</b> <code>${config.wallet.address}</code>\n` +
+      `<b>Tracking:</b> <code>${walletAddress}</code>\n` +
       `<b>Poll interval:</b> ${pollIntervalMs / 1000}s\n\n` +
       `Send /help for commands.`
     : `<b>Bid Scanner Started</b>\n` +
       `Watching ${watchlist.getAll().length} NFT(s). Poll interval: ${pollIntervalMs / 1000}s\n\n` +
-      `Send /help for commands.`;
+      `Send /help for commands.\n` +
+      `Use /wallet &lt;address&gt; to track a wallet.`;
 
   await sendMessage(startMsg);
 
   async function tick() {
     await handleTelegramCommands();
-    if (walletMode) {
+    if (isWalletMode()) {
       await pollWalletOffers();
     } else {
       await pollBids();
