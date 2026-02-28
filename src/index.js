@@ -392,14 +392,26 @@ async function handleUntrack(args) {
   }
 }
 
+function extractWalletAddress(input) {
+  // Direct address: 0x followed by 40 hex chars
+  const directMatch = input.match(/^(0x[a-f0-9]{40})$/i);
+  if (directMatch) return directMatch[1].toLowerCase();
+
+  // OpenSea profile URL: opensea.io/...?addresses=0x...
+  const urlMatch = input.match(/addresses=(0x[a-f0-9]{40})/i);
+  if (urlMatch) return urlMatch[1].toLowerCase();
+
+  return null;
+}
+
 async function handleWallet(args) {
-  // /wallet <address> — set a new wallet to track
+  // /wallet <address or opensea-url> — set a new wallet to track
   if (args.length > 0) {
-    const newAddress = args[0].trim().toLowerCase();
-    if (!/^0x[a-f0-9]{40}$/i.test(newAddress)) {
+    const newAddress = extractWalletAddress(args[0].trim());
+    if (!newAddress) {
       await sendMessage(
         "Invalid wallet address.\n" +
-          "Expected format: <code>0x</code> followed by 40 hex characters."
+          "Send an address (<code>0x...</code>) or an OpenSea profile URL."
       );
       return;
     }
