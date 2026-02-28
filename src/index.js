@@ -125,12 +125,17 @@ async function handleTelegramCommands() {
           break;
         case "/help":
         case "/start":
+          log(`Telegram: /help requested`);
           await sendMessage(
             `<b>Bid Scanner Commands</b>\n\n` +
-              `/track &lt;opensea-url&gt; &lt;bid&gt; — Track an NFT\n` +
-              `/untrack &lt;opensea-url | #number&gt; — Stop tracking\n` +
-              `/list — Show all tracked NFTs\n` +
-              `/help — Show this message`
+              `<b>/track</b> &lt;opensea-url&gt; &lt;bid&gt;\n` +
+              `Add an NFT and alert when best offer exceeds &lt;bid&gt; WETH\n\n` +
+              `<b>/untrack</b> &lt;opensea-url | #number&gt;\n` +
+              `Stop tracking an NFT (use # number from /list)\n\n` +
+              `<b>/list</b>\n` +
+              `Show all tracked NFTs with current best offers\n\n` +
+              `<b>/help</b>\n` +
+              `Show this message`
           );
           break;
       }
