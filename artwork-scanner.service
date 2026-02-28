@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenSea Bid Scanner Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/artwork-scanner
+ExecStart=/opt/node22/bin/node src/index.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/artwork-scanner/scanner.log
+StandardError=append:/root/artwork-scanner/scanner.log
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
