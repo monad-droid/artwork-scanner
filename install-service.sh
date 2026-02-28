@@ -6,6 +6,7 @@ set -e
 
 SERVICE_NAME="artwork-scanner"
 SERVICE_FILE="$(pwd)/${SERVICE_NAME}.service"
+PROJECT_DIR="$(pwd)"
 
 if [ ! -f "$SERVICE_FILE" ]; then
   echo "Error: ${SERVICE_NAME}.service not found in current directory."
@@ -18,6 +19,14 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+# Detect node path
+NODE_BIN="$(which node 2>/dev/null || true)"
+if [ -z "$NODE_BIN" ]; then
+  echo "Error: node not found. Install Node.js first."
+  exit 1
+fi
+echo "Found node at: $NODE_BIN"
+
 # Stop the old nohup process if it's still running
 if pgrep -f "node src/index.js" > /dev/null 2>&1; then
   echo "Stopping existing bot process..."
@@ -25,9 +34,16 @@ if pgrep -f "node src/index.js" > /dev/null 2>&1; then
   sleep 2
 fi
 
-# Install and enable the service
-echo "Installing systemd service..."
-cp "$SERVICE_FILE" /etc/systemd/system/
+# Stop existing service if running
+systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+
+# Build the service file with correct paths
+sed -e "s|__NODE_PATH__|${NODE_BIN}|g" \
+    -e "s|WorkingDirectory=.*|WorkingDirectory=${PROJECT_DIR}|g" \
+    -e "s|append:.*scanner.log|append:${PROJECT_DIR}/scanner.log|g" \
+    "$SERVICE_FILE" > /etc/systemd/system/${SERVICE_NAME}.service
+
+# Enable and start
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl start "$SERVICE_NAME"
