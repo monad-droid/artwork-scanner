@@ -19,10 +19,12 @@ export const config = {
     botToken: required("TELEGRAM_BOT_TOKEN"),
     chatId: required("TELEGRAM_CHAT_ID"),
   },
+  // NFT fields are optional — watchlist.json is the primary source.
+  // These are only used for auto-migration on first run.
   nft: {
     chain: process.env.NFT_CHAIN || "ethereum",
-    contractAddress: required("NFT_CONTRACT_ADDRESS"),
-    tokenId: required("NFT_TOKEN_ID"),
+    contractAddress: process.env.NFT_CONTRACT_ADDRESS || "",
+    tokenId: process.env.NFT_TOKEN_ID || "",
     collectionSlug: process.env.NFT_COLLECTION_SLUG || "",
   },
   pollIntervalMs:

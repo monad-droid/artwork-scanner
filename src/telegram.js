@@ -3,6 +3,8 @@ import { config } from "./config.js";
 const { botToken, chatId } = config.telegram;
 const TELEGRAM_API = `https://api.telegram.org/bot${botToken}`;
 
+let lastUpdateId = 0;
+
 /**
  * Send a text message via the Telegram Bot API.
  */
@@ -46,4 +48,27 @@ export async function sendBidAlert({
     `<a href="${openseaUrl}">View on OpenSea</a>`;
 
   return sendMessage(text);
+}
+
+/**
+ * Poll for new Telegram messages (bot commands).
+ * Returns an array of message objects from the authorized chat only.
+ */
+export async function getUpdates() {
+  const url = `${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=0`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+
+  const data = await res.json();
+  if (!data.ok || !data.result?.length) return [];
+
+  const messages = [];
+  for (const update of data.result) {
+    lastUpdateId = update.update_id;
+    // Only accept messages from the authorized chat
+    if (update.message && String(update.message.chat.id) === String(chatId)) {
+      messages.push(update.message);
+    }
+  }
+  return messages;
 }
