@@ -13,6 +13,7 @@ const { pollIntervalMs } = config;
 
 // In-memory map of "contract:tokenId" -> highest known bid
 const highestBids = new Map();
+const startedAt = Date.now();
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -123,6 +124,9 @@ async function handleTelegramCommands() {
         case "/list":
           await handleList();
           break;
+        case "/status":
+          await handleStatus();
+          break;
         case "/help":
         case "/start":
           log(`Telegram: /help requested`);
@@ -134,6 +138,8 @@ async function handleTelegramCommands() {
               `Stop tracking an NFT (use # number from /list)\n\n` +
               `<b>/list</b>\n` +
               `Show all tracked NFTs with current best offers\n\n` +
+              `<b>/status</b>\n` +
+              `Check if the bot is running\n\n` +
               `<b>/help</b>\n` +
               `Show this message`
           );
@@ -213,6 +219,30 @@ async function handleUntrack(args) {
   } else {
     await sendMessage("Not found in watchlist. Use /list to see tracked NFTs.");
   }
+}
+
+async function handleStatus() {
+  const uptimeMs = Date.now() - startedAt;
+  const seconds = Math.floor(uptimeMs / 1000) % 60;
+  const minutes = Math.floor(uptimeMs / 60000) % 60;
+  const hours = Math.floor(uptimeMs / 3600000) % 24;
+  const days = Math.floor(uptimeMs / 86400000);
+
+  let uptimeStr = "";
+  if (days > 0) uptimeStr += `${days}d `;
+  if (hours > 0 || days > 0) uptimeStr += `${hours}h `;
+  uptimeStr += `${minutes}m ${seconds}s`;
+
+  const items = watchlist.getAll();
+  const pollSec = pollIntervalMs / 1000;
+
+  await sendMessage(
+    `<b>Bot Status: Running</b>\n\n` +
+      `<b>Uptime:</b> ${uptimeStr}\n` +
+      `<b>Tracking:</b> ${items.length} NFT(s)\n` +
+      `<b>Poll interval:</b> ${pollSec}s`
+  );
+  log(`Telegram: /status requested`);
 }
 
 async function handleList() {
