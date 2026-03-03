@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import {
   resolveCollectionSlug,
   getBestOffer,
+  getBestCollectionOffer,
   parseOfferPrice,
   getOfferer,
   getAccountOffers,
@@ -134,20 +135,62 @@ async function checkWalletItem(item) {
     }
   }
 
+  // Check best item-level offer
   const bestOffer = await getBestOffer(item.collectionSlug, item.tokenId);
   const bestPrice = parseOfferPrice(bestOffer);
   const bestBidder = getOfferer(bestOffer);
+  const isOurItemBid =
+    bestBidder.toLowerCase() === walletAddress.toLowerCase();
+  const outbidByItem = !isOurItemBid && bestPrice > item.myBid;
 
-  const isOurBid = bestBidder.toLowerCase() === walletAddress.toLowerCase();
-  const outbid = !isOurBid && bestPrice > item.myBid;
+  // Check best collection-level offer
+  let collectionPrice = 0;
+  let collectionBidder = "unknown";
+  let outbidByCollection = false;
+
+  if (item.collectionSlug) {
+    try {
+      const collectionOffer = await getBestCollectionOffer(
+        item.collectionSlug
+      );
+      collectionPrice = parseOfferPrice(collectionOffer);
+      collectionBidder = getOfferer(collectionOffer);
+      const isOurCollectionBid =
+        collectionBidder.toLowerCase() === walletAddress.toLowerCase();
+      outbidByCollection =
+        !isOurCollectionBid && collectionPrice > item.myBid;
+    } catch (err) {
+      log(
+        `[${item.name}] Could not fetch collection offer: ${err.message}`
+      );
+    }
+  }
+
+  const outbid = outbidByItem || outbidByCollection;
+
+  // Determine the highest competing bid for display and alerts
+  let topPrice, topBidder, isCollectionOffer;
+  if (
+    outbidByCollection &&
+    (!outbidByItem || collectionPrice > bestPrice)
+  ) {
+    topPrice = collectionPrice;
+    topBidder = collectionBidder;
+    isCollectionOffer = true;
+  } else {
+    topPrice = bestPrice;
+    topBidder = bestBidder;
+    isCollectionOffer = false;
+  }
 
   // Cache status for /list
   offerStatus.set(key, {
     name: item.name,
     myBid: item.myBid,
-    bestPrice,
-    bestBidder,
+    bestPrice: topPrice,
+    bestBidder: topBidder,
     outbid,
+    isCollectionOffer,
     collectionSlug: item.collectionSlug,
     contractAddress: item.contractAddress,
     tokenId: item.tokenId,
@@ -155,17 +198,20 @@ async function checkWalletItem(item) {
   });
 
   if (outbid) {
+    const alertKey = `${topPrice}:${isCollectionOffer}`;
     const lastAlerted = outbidAlerts.get(key);
-    if (lastAlerted !== bestPrice) {
+    if (lastAlerted !== alertKey) {
+      const offerType = isCollectionOffer ? "collection offer" : "item offer";
       log(
-        `[${item.name}] OUTBID! Your bid: ${item.myBid.toFixed(4)} | Top: ${bestPrice.toFixed(4)} by ${bestBidder}`
+        `[${item.name}] OUTBID by ${offerType}! Your bid: ${item.myBid.toFixed(4)} | Top: ${topPrice.toFixed(4)} by ${topBidder}`
       );
 
       await sendOutbidAlert({
         tokenName: item.name,
         myBidEth: item.myBid,
-        topBidEth: bestPrice,
-        topBidder: bestBidder,
+        topBidEth: topPrice,
+        topBidder,
+        isCollectionOffer,
         openseaUrl: buildOpenseaUrl(
           item.chain,
           item.contractAddress,
@@ -173,13 +219,13 @@ async function checkWalletItem(item) {
         ),
       });
 
-      outbidAlerts.set(key, bestPrice);
+      outbidAlerts.set(key, alertKey);
     } else {
       log(
-        `[${item.name}] Still outbid (${bestPrice.toFixed(4)} > ${item.myBid.toFixed(4)}) — already alerted`
+        `[${item.name}] Still outbid (${topPrice.toFixed(4)} > ${item.myBid.toFixed(4)}) — already alerted`
       );
     }
-  } else if (isOurBid) {
+  } else if (isOurItemBid) {
     log(`[${item.name}] Top bidder at ${item.myBid.toFixed(4)} WETH`);
     outbidAlerts.delete(key);
   } else {
@@ -529,8 +575,9 @@ async function handleListWallet() {
     const label = status.name;
 
     if (status.outbid) {
+      const offerType = status.isCollectionOffer ? "collection offer" : "item offer";
       text += `${i}. <a href="${url}">${label}</a>\n`;
-      text += `   ${status.myBid.toFixed(4)} WETH — <b>OUTBID</b> (top: ${status.bestPrice.toFixed(4)} by ${status.bestBidder.slice(0, 10)}...)\n\n`;
+      text += `   ${status.myBid.toFixed(4)} WETH — <b>OUTBID</b> by ${offerType} (top: ${status.bestPrice.toFixed(4)} by ${status.bestBidder.slice(0, 10)}...)\n\n`;
     } else {
       text += `${i}. <a href="${url}">${label}</a>\n`;
       text += `   ${status.myBid.toFixed(4)} WETH — top bidder\n\n`;

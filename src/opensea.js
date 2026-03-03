@@ -55,6 +55,23 @@ export async function getBestOffer(collectionSlug, tokenId) {
 }
 
 /**
+ * Get the best (highest) active collection-wide offer for a collection.
+ * GET /api/v2/offers/collection/{slug}/best
+ */
+export async function getBestCollectionOffer(collectionSlug) {
+  const url = `${baseUrl}/offers/collection/${collectionSlug}/best`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const body = await res.text();
+    if (res.status === 404) return null;
+    throw new Error(
+      `OpenSea getBestCollectionOffer failed (${res.status}): ${body}`
+    );
+  }
+  return res.json();
+}
+
+/**
  * Get all active offers for a specific NFT, sorted by price descending.
  * GET /api/v2/offers/collection/{slug}/nfts/{identifier}
  */

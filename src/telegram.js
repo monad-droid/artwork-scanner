@@ -58,14 +58,19 @@ export async function sendOutbidAlert({
   myBidEth,
   topBidEth,
   topBidder,
+  isCollectionOffer,
   openseaUrl,
 }) {
   const diff = topBidEth - myBidEth;
+  const title = isCollectionOffer
+    ? `<b>Outbid by Collection Offer!</b>`
+    : `<b>Outbid Alert!</b>`;
+  const bidLabel = isCollectionOffer ? "Top collection bid" : "Top bid";
   const text =
-    `<b>Outbid Alert!</b>\n\n` +
+    `${title}\n\n` +
     `<b>NFT:</b> ${tokenName}\n` +
     `<b>Your bid:</b> ${myBidEth.toFixed(4)} WETH\n` +
-    `<b>Top bid:</b> ${topBidEth.toFixed(4)} WETH (+${diff.toFixed(4)})\n` +
+    `<b>${bidLabel}:</b> ${topBidEth.toFixed(4)} WETH (+${diff.toFixed(4)})\n` +
     `<b>Top bidder:</b> <code>${topBidder}</code>\n\n` +
     `<a href="${openseaUrl}">View on OpenSea</a>`;
 
